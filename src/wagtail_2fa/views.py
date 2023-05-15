@@ -69,6 +69,9 @@ class LoginView(RedirectURLMixin, FormView):
 
     def get_success_url(self):
         url = self.get_redirect_url()
+        # hack until we find where sprite-<hash>/ appended to the POST url
+        if url is not None and url.find("/sprite-") > 0:
+            url = url[:url.find("/sprite-")]
         return url or resolve_url(settings.LOGIN_REDIRECT_URL)
 
 
