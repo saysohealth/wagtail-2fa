@@ -1,6 +1,8 @@
+from asyncio import iscoroutinefunction
 from functools import partial
 
 import django_otp
+from asgiref.sync import markcoroutinefunction, sync_to_async
 from django.conf import settings
 from django.contrib.auth.views import redirect_to_login
 from django.urls import resolve, reverse
@@ -9,6 +11,10 @@ from django_otp.middleware import OTPMiddleware as _OTPMiddleware
 
 
 class VerifyUserMiddleware(_OTPMiddleware):
+
+    async_capable = True
+    sync_capable = True
+
     _allowed_url_names = [
         "wagtail_2fa_auth",
         "wagtailadmin_login",
@@ -24,13 +30,33 @@ class VerifyUserMiddleware(_OTPMiddleware):
         "wagtail_2fa_device_qrcode",
     ]
 
+    def __init__(self, get_response=None):
+        self.get_response = get_response
+        if iscoroutinefunction(get_response):
+            markcoroutinefunction(self)
+
     def __call__(self, request):
+        if iscoroutinefunction(self.get_response):
+            return self.acall(request)
+        else:
+            return self.call(request)
+
+    def call(self, request):
         if hasattr(self, "process_request"):
             response = self.process_request(request)
         if not response:
             response = self.get_response(request)
         if hasattr(self, "process_response"):
             response = self.process_response(request, response)
+        return response
+
+    async def acall(self, request):
+        if hasattr(self, "aprocess_request"):
+            response = await self.aprocess_request(request)
+        if not response:
+            response = await self.get_response(request)
+        if hasattr(self, "aprocess_response"):
+            response = await self.aprocess_response(request, response)
         return response
 
     def process_request(self, request):
@@ -53,6 +79,31 @@ class VerifyUserMiddleware(_OTPMiddleware):
                 return redirect_to_login(
                     request.get_full_path(), login_url=reverse("wagtail_2fa_device_new")
                 )
+
+    @sync_to_async
+    def _aprocess_request(self, request):
+        if request.user:
+            request.user = SimpleLazyObject(
+                partial(self._verify_user, request, request.user)
+            )
+        user = request.user
+        if self._require_verified_user(request):
+            user_has_device = django_otp.user_has_device(user, confirmed=True)
+
+            if user_has_device and not user.is_verified():
+                return redirect_to_login(
+                    request.get_full_path(), login_url=reverse("wagtail_2fa_auth")
+                )
+
+            elif not user_has_device and settings.WAGTAIL_2FA_REQUIRED:
+                # only allow the user to visit the admin index page and the
+                # admin setup page
+                return redirect_to_login(
+                    request.get_full_path(), login_url=reverse("wagtail_2fa_device_new")
+                )
+
+    async def aprocess_request(self, request):
+        return await self._aprocess_request(request)
 
     def _require_verified_user(self, request):
         user = request.user
